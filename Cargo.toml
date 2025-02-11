@@ -1,0 +1,19 @@
+[package]
+name = "h4-bigdata"
+version = "0.1.0"
+edition = "2021"
+description = "A school project for learning about Big Data."
+authors = ["Bastian Asmussen <bastian@asmussen.tech>"]
+readme = "README.md"
+license-file = "LICNESE"
+repository = "https://github.com/BastianAsmussen/H4_BigData"
+
+[dependencies]
+anyhow = "1.0.95"
+rand = "0.9.0"
+rdkafka = { version = "0.37.0", features = ["cmake-build"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+tokio = { version = "1.43.0", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"

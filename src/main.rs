@@ -78,7 +78,14 @@ async fn main() -> Result<()> {
                     .key(&message.customer_id.to_string())
                     .payload(json.as_bytes()),
             )
-            .map_err(|(e, _)| e)?;
+            .map_err(|(e, _)| e);
+        let result = match result {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Kafka Error: {e}");
+                continue;
+            }
+        };
 
         handles.push(tokio::spawn(async move {
             match result.await {

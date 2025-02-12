@@ -7,7 +7,7 @@ use rdkafka::{
     ClientConfig,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
@@ -62,9 +62,12 @@ async fn main() -> Result<()> {
     .iter()
     .map(|x| (*x).to_string())
     .collect();
+
     let topic = "household_consumption";
 
     let producer = create_producer(&brokers.join(","))?;
+
+    let mut handles = Vec::new();
     loop {
         let message = Message::default();
         let json = serde_json::to_string(&message)?;
@@ -75,18 +78,28 @@ async fn main() -> Result<()> {
                     .key(&message.customer_id.to_string())
                     .payload(json.as_bytes()),
             )
-            .map_err(|(e, _)| e.to_string());
+            .map_err(|(e, _)| e)?;
 
-        tokio::spawn(async move {
-            match result {
-                Ok(v) => match v.await {
-                    Ok(Ok((_, id))) => info!("Produced message: {id}"),
-                    Ok(Err((e, _))) => error!("Kafka Error: {e}"),
-                    Err(e) => error!("Producer Cancelled: {e}"),
-                },
-                Err(e) => error!("{e}"),
+        handles.push(tokio::spawn(async move {
+            match result.await {
+                Ok(Ok((_, id))) => info!("Produced Message: {id}"),
+                Ok(Err((e, _))) => error!("Kafka Error: {e}"),
+                Err(e) => warn!("Producer Cancelled: {e}"),
+            };
+        }));
+
+        if handles.len() < 1024 * 1024 {
+            continue;
+        }
+
+        // Drain the pool.
+        info!("Draining thread pool...");
+        while let Some(thread) = handles.pop() {
+            if let Err(e) = thread.await {
+                error!("Failed to join thread: {e}");
+                continue;
             }
-        });
+        }
     }
 }
 

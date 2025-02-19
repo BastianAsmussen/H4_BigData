@@ -1,44 +1,106 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use rand::Rng;
+use rand::{prelude::ThreadRng, Rng};
 use rdkafka::{
     producer::{FutureProducer, FutureRecord},
     ClientConfig,
 };
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+/// Wrapper type for `f32` when used as mWh.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MilliwattHours(pub f32);
+
+/// A message from or to a Kafka cluster.
+///
+/// # Fields
+///
+/// * `customer_id` - The ID of the customer.
+/// * `consumption` - The mWh of the customer's electrical consumption.
+/// * `timestamp` - The time, in milliseconds since the [Unix Epoch](https://en.wikipedia.org/wiki/Unix_time).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     customer_id: u32,
-    consumption: f32,
+    consumption: MilliwattHours,
     timestamp: u128,
 }
 
 impl Message {
+    /// Construct a new `Message` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `customer_id` - The ID of the customer.
+    /// * `consumption` - The mWh of the customer's electrical consumption.
+    /// * `timestamp` - The time, in milliseconds since the [Unix Epoch](https://en.wikipedia.org/wiki/Unix_time).
+    ///
+    /// # Returns
+    ///
+    /// * A new instance of `Message`.
     #[must_use]
-    pub const fn new(customer_id: u32, consumption: f32, timestamp: u128) -> Self {
+    pub const fn new(customer_id: u32, consumption: MilliwattHours, timestamp: u128) -> Self {
         Self {
             customer_id,
             consumption,
             timestamp,
         }
     }
-}
 
-impl Default for Message {
-    fn default() -> Self {
-        let mut rng = rand::rng();
+    /// Generate a new instance of `Message` with randomized values.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - The randomness seed to use for generation.
+    ///
+    /// # Returns
+    ///
+    /// * A new `Message` instance random values.
+    ///
+    /// # Panics
+    ///
+    /// * If the system time is less than the [Unix Epoch](https://en.wikipedia.org/wiki/Unix_time).
+    pub fn with_rng(rng: &mut ThreadRng) -> Self {
+        let customer_id = rng.random_range(1_000..=9_999);
+        let consumption = MilliwattHours(rng.random::<f32>() * 10.0);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards!")
+            .as_millis();
 
-        Self {
-            customer_id: rng.random_range(1_000..=9_999),
-            consumption: rng.random::<f32>() * 10.0,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards!")
-                .as_millis(),
-        }
+        Self::new(customer_id, consumption, timestamp)
+    }
+
+    /// Get the customer ID of the message.
+    ///
+    /// # Returns
+    ///
+    /// * The customer's ID as a `u32`.
+    #[must_use]
+    pub const fn customer_id(&self) -> u32 {
+        self.customer_id
+    }
+
+    /// Get the mWh electrical consumption of the customer.
+    ///
+    /// # Returns
+    ///
+    /// * The electrical consumption, in mWh.
+    #[must_use]
+    pub const fn consumption(&self) -> MilliwattHours {
+        self.consumption
+    }
+
+    /// Get the timestamp of the message.
+    ///
+    /// # Returns
+    ///
+    /// * The timestamp, in milliseconds.
+    #[must_use]
+    pub const fn timestamp(&self) -> u128 {
+        self.timestamp
     }
 }
 
@@ -63,19 +125,19 @@ async fn main() -> Result<()> {
     .map(|x| (*x).to_string())
     .collect();
 
-    let topic = "household_consumption";
-
+    let topic = "household_consumption2";
     let producer = create_producer(&brokers.join(","))?;
 
+    let mut rng = rand::rng();
     let mut handles = Vec::new();
     loop {
-        let message = Message::default();
+        let message = Message::with_rng(&mut rng);
         let json = serde_json::to_string(&message)?;
 
         let result = producer
             .send_result(
                 FutureRecord::to(topic)
-                    .key(&message.customer_id.to_string())
+                    .key(&message.customer_id().to_string())
                     .payload(json.as_bytes()),
             )
             .map_err(|(e, _)| e);
@@ -95,18 +157,7 @@ async fn main() -> Result<()> {
             };
         }));
 
-        if handles.len() < 1024 * 1024 {
-            continue;
-        }
-
-        // Drain the pool.
-        info!("Draining thread pool...");
-        while let Some(thread) = handles.pop() {
-            if let Err(e) = thread.await {
-                error!("Failed to join thread: {e}");
-                continue;
-            }
-        }
+        drain_threadpool(&mut handles, 1024 * 1024).await;
     }
 }
 
@@ -119,4 +170,24 @@ fn create_producer(bootstrap_server: &str) -> Result<FutureProducer> {
         .create()?;
 
     Ok(config)
+}
+
+/// Drain the thread pool if the limit is exceeded.
+///
+/// # Arguments
+///
+/// * `handles` - A mutable reference to the `JoinHandle` array.
+/// * `limit` - The maximum number of thread handles allowed to exist at once.
+async fn drain_threadpool(handles: &mut Vec<JoinHandle<()>>, limit: usize) {
+    if handles.len() < limit {
+        return;
+    }
+
+    info!("Draining thread pool...");
+    while let Some(thread) = handles.pop() {
+        if let Err(e) = thread.await {
+            error!("Failed to join thread: {e}");
+            continue;
+        }
+    }
 }
